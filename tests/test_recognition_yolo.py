@@ -363,3 +363,80 @@ def test_crop_cache_fast_path_and_invalidation(monkeypatch):
         assert P._crop_cache["box"] is None
     finally:
         P._crop_cache.update(shape=None, box=None)
+
+
+def test_piece_far_outside_box_excluded():
+    """框外 0.6~0.9 格的"棋子"（多半是 UI 装饰误检）不得回夹成边行棋子。
+
+    "红方炮超过 2 个（当前 3 个）"这类误检的一个来源：棋盘边缘外的
+    装饰被当棋子并回夹到边行——接纳范围从 0.9 格收紧到 0.6 格。
+    """
+    from recognition.yolo import CLASS_TO_FEN, Detection
+    from recognition.yolo_board import board_from_detections
+
+    label_of = {v: k for k, v in CLASS_TO_FEN.items()}
+    box = Detection(label="board", score=0.85, box=(80.0, 80.0, 560.0, 588.0))
+    # 底边 588；格高 (588-80)/9 ≈ 56.4 → 0.8 格 ≈ 45px
+    far_junk = Detection(label=label_of["C"], score=0.9,
+                         box=(290, 603, 350, 663))     # center y=633，框外 0.8 格
+    real = Detection(label=label_of["K"], score=0.95,
+                     box=(290, 80, 350, 140))          # 正常顶行棋子
+    real2 = Detection(label=label_of["k"], score=0.95,
+                      box=(170, 80, 230, 140))         # 第二颗正常棋子
+    br = board_from_detections([far_junk, real, real2, box], img=None)
+    assert br is not None
+    assert br.n_pieces == 2, f"框外装饰不应被计入（实际 {br.n_pieces} 子）"
+    assert all(br.grid[9][c] is None for c in range(9)), "底行不应出现回夹来的假棋子"
+
+
+def test_crop_result_touching_edge_rejected(monkeypatch):
+    """裁剪识别出的棋盘框贴着裁剪边（棋盘被裁掉一块）→ 不可采用。
+
+    防止"裁剪切掉一列→映射拉伸→看似合法但错误的棋盘"被采用并进缓存。
+    """
+    import numpy as np
+    import recognition.pipeline as P
+    from recognition.yolo import Detection
+    from recognition.yolo_board import BoardResult
+
+    full = np.full((900, 600, 3), 40, np.uint8)
+
+    class _Det:
+        def detect(self, img):
+            return [Detection("r_che", 0.9, (10, 10, 40, 40)),
+                    Detection("b_che", 0.9, (50, 10, 80, 40)),
+                    Detection("r_ma", 0.9, (10, 50, 40, 80)),
+                    Detection("b_ma", 0.9, (50, 50, 80, 80))]
+
+    calls = {"crop": 0}
+
+    def _fake_from_dets(dets, img=None, skin_templates=None):
+        if img is not None and img.shape[:2] == full.shape[:2]:
+            grid = [[None] * 9 for _ in range(10)]
+            grid[0][0] = "r"
+            return BoardResult(grid=grid, red_at_top=False,
+                               board_box=(10.0, 10.0, 300.0, 420.0),
+                               n_pieces=16, n_ambiguous=0, low_conf=[],
+                               corrections=[], n_corrected=0)
+        calls["crop"] += 1
+        # 裁剪结果：框贴着裁剪边缘（顶边 y=0）→ 应被拒绝
+        from core.board import Board
+        return BoardResult(grid=[row[:] for row in Board().grid],
+                           red_at_top=False,
+                           board_box=(20.0, 0.0, 260.0, 290.0),
+                           n_pieces=32, n_ambiguous=0, low_conf=[],
+                           corrections=[], n_corrected=0)
+
+    monkeypatch.setattr(P, "get_detector", lambda mp=None: _Det())
+    monkeypatch.setattr(P, "get_skin_templates", lambda p=None: None)
+    monkeypatch.setattr(P, "board_from_detections", _fake_from_dets)
+    monkeypatch.setattr(P, "_crop_box_from_dets",
+                        lambda dets, shape: (50, 60, 550, 800))
+    P._crop_cache.update(shape=None, box=None)
+    try:
+        res = P.recognize_screenshot(full)
+        assert calls["crop"] == 1, "应尝试过裁剪"
+        assert "裁剪" not in (res.warning or ""), "贴边裁剪结果不应被采用"
+        assert P._crop_cache["box"] is None, "不可信的裁剪不得进缓存"
+    finally:
+        P._crop_cache.update(shape=None, box=None)

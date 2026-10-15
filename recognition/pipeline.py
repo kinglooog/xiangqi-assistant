@@ -215,6 +215,14 @@ def _recognize_cropped_image(img_bgr: np.ndarray, cbox, det,
         return None
     if not board_plausibility(br2)[0]:
         return None
+    # 裁剪可信度：识别出的棋盘框贴着裁剪边缘 -> 棋盘很可能被裁掉了一部分
+    # （棋子范围估出的裁剪框在误检稀疏时会偏小）。这种"看着合法但缺一块"
+    # 的局面不能采用，更不能进缓存被后续帧反复复用
+    _bb = br2.board_box
+    _t = 6.0
+    if (_bb[0] <= _t or _bb[1] <= _t
+            or _bb[2] >= (x2 - x1) - _t or _bb[3] >= (y2 - y1) - _t):
+        return None
     # 坐标全部换算回原图：代点点击与皮肤模板采集都依赖原图坐标系
     bb = br2.board_box
     br2.board_box = (bb[0] + x1, bb[1] + y1, bb[2] + x1, bb[3] + y1)

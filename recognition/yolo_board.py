@@ -101,13 +101,14 @@ def board_from_detections(dets: List[Detection],
         ys = [p.center[1] for p in pieces]
         bx1, bx2, by1, by2 = min(xs), max(xs), min(ys), max(ys)
 
-    # 只保留落在棋盘框内（含框外近一格）的棋子。board 框的边缘可能有偏差：
-    # 实测某模型框左缘比棋子中心靠右 2.3px、某皮肤框底边比底行棋子中心
-    # 短 32px——按原始框过滤会把整条边列/边行的棋子丢掉。红帅黑将都在
-    # 底线行，丢掉会被判成残缺帧整帧作废（"缺少红帅"大量误报的根源）。
+    # 只保留落在棋盘框内（含框外 0.6 格内）的棋子。board 框的边缘可能有
+    # 偏差：实测某模型框左缘比棋子中心靠右 2.3px、某皮肤框底边比底行棋子
+    # 中心短 32px（0.55 格）——按原始框过滤会把整条边列/边行的棋子丢掉。
+    # 外扩取 0.6 格：够救边行（实测最大偏差 0.55 格），又能挡住棋盘边缘
+    # 0.6~0.9 格处的 UI 装饰被回夹成"多出来的炮/相"（实际发生过的误检）
     est_gw = max((bx2 - bx1) / 8.0, 1.0)
     est_gh = max((by2 - by1) / 9.0, 1.0)
-    mx, my = est_gw * 0.9, est_gh * 0.9
+    mx, my = est_gw * 0.6, est_gh * 0.6
     inside = [p for p in pieces
               if bx1 - mx <= p.center[0] <= bx2 + mx
               and by1 - my <= p.center[1] <= by2 + my]

@@ -117,7 +117,7 @@ def harvest(img_bgr: np.ndarray, detections, board_box, red_at_top: bool,
     # 与识别同源的"框外近一格"过滤 + 单元格映射（含边行回夹）：
     # 两边映射不一致时，会把邻格棋子当成本格类别采集，污染模板
     from recognition.yolo_board import map_center_to_cell
-    mx, my = gw * 0.9, gh * 0.9
+    mx, my = gw * 0.6, gh * 0.6
     for p in detections:
         if p.label == "board":
             continue

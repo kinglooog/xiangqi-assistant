@@ -2192,6 +2192,12 @@ class MainWindow(QMainWindow):
             if self._dropped_frames % 10 == 1:
                 self._sync_log(f"丢弃疑似残缺帧（{reason}，"
                                f"第 {self._dropped_frames} 次）")
+            # 取证：每个丢帧段的首帧就存档（限频 90 秒）。此前只每 30 帧
+            # 存一次，间歇性误检（多一个炮/缺红帅）从不留下证据可查
+            if (self._dropped_frames == 1
+                    and time.time() - getattr(self, "_fail_save_at", 0.0) > 90):
+                self._fail_save_at = time.time()
+                self._save_fail_frame(img, reason)
             # 连续多帧不可用 -> 升级为"棋盘不可用"：允许续局逻辑介入
             # 并给出提示，而不是无声地一直丢帧
             if self._dropped_frames >= 5:
