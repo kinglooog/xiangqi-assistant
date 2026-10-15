@@ -184,6 +184,7 @@ def test_ponder_info_stm_keeps_red_perspective(qapp):
     w._search_fen = w.game.board.to_fen()
     w._arm_ponder()
     assert w._search_stm == RED, "预计算根局面是我方该走，视角应更新为我方"
+    w._info_mute_until = 0.0          # 解除过渡期静音（本测试只看视角映射）
     # 预计算 info 以红方（我方）为正分：胜率条必须仍显示红方占优
     w._engine_info_cb({"score": 300, "score_str": "+3.00", "multipv": 1,
                        "depth": 20, "pv": ["g3g4"], "score_kind": "cp"})
@@ -214,6 +215,7 @@ def test_ponder_pv_translated_from_searched_position(qapp):
     w._search_fen = w.game.board.to_fen()
     w._arm_ponder()
     assert w._search_root_fen is not None, "应记录被搜索局面"
+    w._info_mute_until = 0.0          # 解除过渡期静音（本测试只看翻译映射）
     # 预计算局面（红方已走 h2e2）里的黑方候选着法
     w._engine_info_cb({"score": -80, "score_str": "-0.80", "multipv": 1,
                        "depth": 18, "pv": ["b9c7", "h2e2"], "score_kind": "cp"})
@@ -223,4 +225,32 @@ def test_ponder_pv_translated_from_searched_position(qapp):
         f"不应显示 ICCS 编码串，实际 {top['pv_cn']}"
     text = w.panel.pv_list.item(0).text()
     assert "[黑方]" in text, f"候选着法标签应为被搜索方（黑），实际：{text}"
+    w.engine.stop()
+
+
+def test_ponder_transition_mutes_stale_info(qapp):
+    """预计算挂起/未命中的过渡期，在途的旧搜索 info 不得更新面板。
+
+    旧 info 属于另一个局面，若穿透守卫会短暂显示错误评估/建议（箭头指错）。
+    """
+    w = _win_with_fake(qapp)
+    w.board.set_my_color(RED)
+    w.panel.set_my_color(RED)
+    w.game.reset(OPEN_BLACK_TURN)
+    w.board.set_game(w.game)
+    w._expected_reply = "h9g7"
+    w._search_stm = "b"
+    w._search_fen = w.game.board.to_fen()
+    w._arm_ponder()
+    # 过渡期内的 info（模拟在途旧搜索）：被静音
+    w._engine_info_cb({"score": 50, "score_str": "+0.50", "multipv": 1,
+                       "depth": 5, "pv": ["h2e2"], "score_kind": "cp"})
+    assert not w.panel.pv_lines, "过渡期旧 info 应被静音"
+    assert w.board.best_move is None, "静默期不应设置建议箭头"
+    # 静音窗口过后恢复接收
+    w._info_mute_until = 0.0
+    w._last_info_time = 0.0
+    w._engine_info_cb({"score": 50, "score_str": "+0.50", "multipv": 1,
+                       "depth": 6, "pv": ["h2e2"], "score_kind": "cp"})
+    assert w.panel.pv_lines, "静音结束后应恢复更新"
     w.engine.stop()

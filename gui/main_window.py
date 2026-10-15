@@ -316,6 +316,7 @@ class MainWindow(QMainWindow):
         self._ponder_expected = ""        # 预计对手会走的着法（ICCS）
         self._expected_reply = None       # 上一轮分析 PV 第二着（ICCS）
         self._search_root_fen = None      # 被搜索局面的 fen（PV 翻译的基准）
+        self._info_mute_until = 0.0       # 过渡期静音截止时刻（吞在途旧 info）
         self._close_clicks = 0           # 本次结算的关弹窗点击次数（限次防误点）
         self._coord_clicks = 0           # 坐标兜底点击次数（限次）
         self._settling = False           # 接管时处于结算界面（棋盘不完整）
@@ -364,6 +365,10 @@ class MainWindow(QMainWindow):
 
     def _engine_info_cb(self, info: dict) -> None:
         """引擎线程回调。做最少的工作，其余投递到 GUI 线程。"""
+        # 过渡期静音：预计算挂起/未命中时会有一批属于旧搜索的 info 在途，
+        # 照单全收会短暂显示错误局面的评估与"建议着法"（箭头指错）
+        if time.time() < getattr(self, "_info_mute_until", 0.0):
+            return
         # 丢弃过期搜索的 info：局面已变时，上一步搜索仍会继续吐出若干条
         # info，若照单全收会让面板显示上一步局面的评估（红黑视角也会跟着错）。
         if getattr(self, "_search_fen", None) is not None and \
@@ -599,6 +604,7 @@ class MainWindow(QMainWindow):
             self._search_root_fen = fen
         self._ponder_discard = True                  # 先停掉残留搜索，其 bestmove 丢弃
         self._pondering = True                       # 守卫先立：旧 bestmove 一律忽略
+        self._info_mute_until = time.time() + 0.25   # 在途旧 info 一并吞掉
         try:
             self.engine.stop_search()
             self.engine.position(fen, [iccs])        # 最后一步 = 预计对手着法
@@ -649,6 +655,7 @@ class MainWindow(QMainWindow):
             self._sync_log(f"预计算未命中（实际 {move_to_iccs(actual)} ≠ "
                            f"预计 {exp or '无'}）——按常规重新分析")
             self._ponder_discard = True              # 丢弃该预搜索的 bestmove
+            self._info_mute_until = time.time() + 0.25   # 在途旧 info 一并吞掉
             try:
                 self.engine.stop_search()
             except Exception:
@@ -675,6 +682,7 @@ class MainWindow(QMainWindow):
         self._expected_reply = None
         if active and self.engine is not None:
             self._ponder_discard = True
+            self._info_mute_until = time.time() + 0.25   # 在途旧 info 一并吞掉
             try:
                 self.engine.stop_search()
             except Exception:
@@ -2456,6 +2464,9 @@ class MainWindow(QMainWindow):
                 if self.game.play(mv):
                     if self._auto_click_pending and                             move_to_iccs(self._auto_click_pending["move"]) == move_to_iccs(mv):
                         self._auto_click_pending = None   # 代点已被窗口画面确认
+                    # 局面已变：清掉旧建议箭头（否则整段对手回合都指着一个
+                    # 已经走掉的着法、对手走完后坐标全变——看起来就是乱指）
+                    self.board.set_best_move(None)
                     self.board.animate_move(mv,
                                             self.game.board.piece_at(*mv[1]))
                     self.sound.play("capture"
@@ -2476,6 +2487,7 @@ class MainWindow(QMainWindow):
                     if reply is not None:
                         self._pending_reply = None
                         if self.game.play(reply):
+                            self.board.set_best_move(None)
                             self.board.animate_move(
                                 reply, self.game.board.piece_at(*reply[1]))
                             if self.board.my_color is not None:

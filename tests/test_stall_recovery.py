@@ -662,3 +662,25 @@ def test_grab_fail_heal_restores_minimized(qapp, monkeypatch):
     w._grab_fail_heal()
     assert calls == [w._sync_hwnd], "应尝试恢复最小化的对局窗口"
     w.engine.stop() if w.engine else None
+
+
+def test_synced_move_clears_stale_arrow(qapp):
+    """窗口画面同步出着法后必须清掉旧建议箭头。
+
+    实际 bug：同步路径不清理 best_move——整段对手回合都指着一个已经
+    走掉的着法，对手走完后棋盘变了、箭头坐标却没变，看起来就是乱指。
+    """
+    w = _win(qapp)
+    w.board.set_my_color(BLACK)
+    w.game.reset("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/"
+                 "1C5C1/9/RNBAKABNR b - - 0 1")
+    # 一个"我方（黑）已走过马8进7"的观察帧
+    observed = [row[:] for row in w.game.board.grid]
+    observed[0][1] = None
+    observed[2][2] = "n"
+    w.board.set_game(w.game)
+    w.board.set_best_move(((0, 1), (2, 2)))       # 摆一个旧箭头
+    w._handle_sync_events([{"type": "changed", "grid": observed}],
+                          _res(observed))
+    assert w.board.best_move is None, "同步出着法后旧箭头应被清掉"
+    w.engine.stop() if w.engine else None
