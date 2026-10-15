@@ -112,6 +112,13 @@ def recognize_screenshot(img_bgr: np.ndarray,
                 if br is not None and br.n_pieces >= 4:
                     ok_box, _why = board_plausibility(br)
                     if ok_box:
+                        # 记住"贴棋盘框"的紧凑裁剪：后续帧也用它识别——
+                        # 装饰物不进输入（"多出一个炮/相"的误检来源之一），
+                        # 识别更快；窗口移动/换模式时由校验失败自动回退
+                        tight = _tight_crop_box(br.board_box, img_bgr.shape)
+                        if tight is not None:
+                            _crop_cache.update(shape=img_bgr.shape[:2],
+                                               box=tight)
                         return _from_yolo(br, dets, skin_classes=len(templates or {}))
                     # 某些皮肤下整窗识别会把装饰边框算进棋盘（框过高、
                     # 底线错位、将帅丢失）——按棋子位置把窗口裁剪到棋盘
@@ -185,19 +192,41 @@ def _crop_box_from_dets(dets: List[Detection], shape) -> Optional[tuple]:
     return (x1, y1, x2, y2)
 
 
+def _tight_crop_box(board_box, shape, margin_cells: float = 0.5):
+    """贴着棋盘框的紧凑裁剪（+半格余量）。返回 (x1,y1,x2,y2) 或 None。
+
+    用户实测：裁到棋盘边（排除鼓/旗/凳等装饰与工具栏）识别更稳——
+    装饰物正是"多出一个炮/相"这类误检的来源之一，且棋盘占满输入。
+    """
+    bx1, by1, bx2, by2 = board_box
+    cell = max((bx2 - bx1) / 8.0, (by2 - by1) / 9.0)
+    m = cell * margin_cells
+    H, W = shape[0], shape[1]
+    x1 = int(max(0, bx1 - m))
+    y1 = int(max(0, by1 - m))
+    x2 = int(min(W, bx2 + m))
+    y2 = int(min(H, by2 + m))
+    if x2 - x1 < 50 or y2 - y1 < 50:
+        return None
+    return (x1, y1, x2, y2)
+
+
 def _retry_cropped(img_bgr: np.ndarray, dets: List[Detection], det,
                    templates) -> Optional[RecognizeResult]:
     """裁剪到棋盘区域后重新识别；成功则记住裁剪框供后续帧复用。
 
     这是"整窗识别把皮肤边框算进棋盘"的修复路径：裁剪后的输入去掉了
     窗口 UI 与边框干扰，同皮肤下模型识别正常（用户实测 + 实机复现）。
+    首次用"棋子范围+1.5 格"的宽松裁剪（某条边棋子漏检时也能框住棋盘），
+    成功后记住"贴棋盘框+半格"的紧凑裁剪供后续帧使用（更干净）。
     """
     cbox = _crop_box_from_dets(dets, img_bgr.shape)
     if cbox is None:
         return None
     res = _recognize_cropped_image(img_bgr, cbox, det, templates)
     if res is not None:
-        _crop_cache.update(shape=img_bgr.shape[:2], box=cbox)
+        tight = _tight_crop_box(res.board_box, img_bgr.shape) or cbox
+        _crop_cache.update(shape=img_bgr.shape[:2], box=tight)
     return res
 
 
