@@ -1632,6 +1632,10 @@ class MainWindow(QMainWindow):
         my_turn = dlg.my_turn_now
         self._sync_log(f"确认完成：我执{'红' if my_color=='w' else '黑'}，"
                        f"轮到{'我方' if my_turn else '对方'}")
+        # 用户点了「翻转棋盘」：红黑上下方向识别反了——网格翻转 180°
+        if getattr(dlg, "flip_orientation", False):
+            self._apply_orientation_flip(res)
+            self._sync_log("按用户操作翻转棋盘方向（红黑上下识别反了）")
         # 局面核对（同框完成）：识别错处由用户修正 -> 干净皮肤模板
         vdlg = _td.VerifyBoardDialog(self, grid=res.grid, my_color=my_color)
         if vdlg.exec() != QDialog.DialogCode.Accepted or not vdlg.confirmed_grid:
@@ -1698,6 +1702,16 @@ class MainWindow(QMainWindow):
             + ("现在就轮到你，软件开始走子…"
                if my_turn else "等待对手走子，走完自动接管节奏。"))
         self._refresh_all()
+
+    @staticmethod
+    def _apply_orientation_flip(res) -> None:
+        """把识别结果上下翻转 180°（红黑方向识别反了时用户手动纠正）。
+
+        同时翻转 red_at_top 与网格：点击坐标换算、同步基准、皮肤模板
+        采集都以 red_at_top 为基准，两者必须一起翻，否则越走越乱。
+        """
+        res.red_at_top = not res.red_at_top
+        res.grid = [row[::-1] for row in res.grid[::-1]]
 
     def _stop_takeover_cleanup(self):
         """接管收尾：取消置顶、复位按钮。"""
