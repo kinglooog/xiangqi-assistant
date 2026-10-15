@@ -21,18 +21,14 @@ class TakeoverDialog(QDialog):
 
     阵营推断依据：JJ（及绝大多数象棋 App）总是把"你"的棋子放在
     你屏幕的下半方。识别到红方在上 -> 你执黑；红方在下 -> 你执红。
-    若你在观战/代他人走，可手动改选阵营；若上下方向识别反了，
-    点「翻转棋盘」把识别结果翻 180°（网格与阵营推断一起翻）。
+    若你在观战/代他人走，可手动改选阵营。
     """
 
     def __init__(self, parent=None, red_at_top: bool = False,
                  window_title: str = "", n_pieces: int = 0):
         super().__init__(parent)
         self.setWindowTitle("一键接管 · 确认")
-        self.resize(470, 350)
-        self._red_at_top0 = bool(red_at_top)
-        self._red_at_top = bool(red_at_top)
-        self.flip_orientation = False        # 用户是否翻转了红黑上下方向
+        self.resize(470, 300)
         derived = BLACK if red_at_top else RED
         self.my_color: str = derived
         self.my_turn_now: bool = True
@@ -43,23 +39,24 @@ class TakeoverDialog(QDialog):
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        self.lbl_ori = QLabel()
-        self.lbl_ori.setWordWrap(True)
-        self.lbl_ori.setStyleSheet("color:#1b5e20;")
-        layout.addWidget(self.lbl_ori)
-
-        # 上下方向识别反了时的纠正入口（翻转网格 180°）
-        self.btn_flip = QPushButton("🔄 翻转棋盘（若红黑上下识别反了，点这里）")
-        self.btn_flip.clicked.connect(self._toggle_flip)
-        layout.addWidget(self.btn_flip)
+        ori = QLabel(f"检测到 {'红方在上方' if red_at_top else '红方在下方'}"
+                     f" —— 按惯例你的棋子在"
+                     f"{'上' if red_at_top else '下'}半屏，"
+                     f"推断你执{'黑方' if derived == BLACK else '红方'}。")
+        ori.setWordWrap(True)
+        ori.setStyleSheet("color:#1b5e20;")
+        layout.addWidget(ori)
 
         layout.addSpacing(4)
         h1 = QLabel("我执（一般不用改，自动按 JJ 惯例推断）：")
         layout.addWidget(h1)
-        self.rb_my_auto = QRadioButton()
+        self.rb_my_auto = QRadioButton(
+            f"自动推断：我执{'黑方' if derived == BLACK else '红方'}")
         self.rb_my_auto.setChecked(True)
         layout.addWidget(self.rb_my_auto)
-        self.rb_my_flip = QRadioButton()
+        self.rb_my_flip = QRadioButton(
+            f"反过来：我执{'红方' if derived == BLACK else '黑方'}"
+            "（观战/代他人走时选这个）")
         layout.addWidget(self.rb_my_flip)
 
         layout.addSpacing(4)
@@ -81,32 +78,7 @@ class TakeoverDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        self._refresh_labels()
-
-    def _derived(self) -> str:
-        """按当前方向假设推导的阵营（红在下 -> 执红）。"""
-        return BLACK if self._red_at_top else RED
-
-    def _refresh_labels(self) -> None:
-        derived = self._derived()
-        side = "黑方" if derived == BLACK else "红方"
-        other = "红方" if derived == BLACK else "黑方"
-        self.lbl_ori.setText(
-            f"检测到 {'红方在上方' if self._red_at_top else '红方在下方'}"
-            f" —— 按惯例你的棋子在{'上' if self._red_at_top else '下'}半屏，"
-            f"推断你执{side}。")
-        self.rb_my_auto.setText(f"自动推断：我执{side}")
-        self.rb_my_flip.setText(f"反过来：我执{other}"
-                                "（观战/代他人走时选这个）")
-
-    def _toggle_flip(self) -> None:
-        """翻转红黑上下方向：方向假设与网格在接管采纳时一起翻 180°。"""
-        self._red_at_top = not self._red_at_top
-        self.flip_orientation = (self._red_at_top != self._red_at_top0)
-        self._refresh_labels()
-
     def accept(self) -> None:
-        self.my_color = self._derived()
         if self.rb_my_flip.isChecked():
             self.my_color = RED if self.my_color == BLACK else BLACK
         self.my_turn_now = self.rb_turn_me.isChecked()
@@ -127,6 +99,7 @@ class VerifyBoardDialog(QDialog):
         self.setWindowTitle("确认接管局面（一次性，约 10 秒）")
         self.resize(720, 760)
         self.confirmed_grid = None
+        self.flipped = False        # 用户是否整盘翻转了 180°（红黑上下反了）
 
         from gui.board_editor import BoardEditorWidget, PiecePalette
 
@@ -135,6 +108,12 @@ class VerifyBoardDialog(QDialog):
                      "（右键擦除）。全对就直接点 OK。")
         tip.setWordWrap(True)
         root.addWidget(tip)
+
+        # 方向识别反了（复刻盘与 JJ 上下相反）时：先整盘翻转，再逐格修正
+        self.btn_flip = QPushButton(
+            "🔄 翻转棋盘（复刻盘与 JJ 上下相反时点这里，翻转后再逐格修正）")
+        self.btn_flip.clicked.connect(self._flip_board)
+        root.addWidget(self.btn_flip)
 
         self.editor = BoardEditorWidget()
         self.editor.setMinimumSize(400, 460)
@@ -155,6 +134,12 @@ class VerifyBoardDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+    def _flip_board(self) -> None:
+        """整盘旋转 180°（行列同时反转）；再点一次翻回去。"""
+        grid = self.editor.get_grid()
+        self.editor.set_grid([row[::-1] for row in grid[::-1]])
+        self.flipped = not self.flipped
 
     def accept(self):
         self.confirmed_grid = self.editor.get_grid()

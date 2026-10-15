@@ -1,52 +1,85 @@
 # -*- coding: utf-8 -*-
-"""接管确认界面的「翻转棋盘」功能测试。
+"""接管核对界面的「翻转棋盘」功能测试。
 
-场景：红黑上下方向被识别反了（如把红方在上误判/漏判），用户点
-「翻转棋盘」后：网格翻 180°、阵营推断跟着翻，后续点击坐标换算
-与同步基准都基于翻转后的 red_at_top。
+场景：红黑上下方向识别反了——在"确认接管局面"核对界面里整盘翻转
+180° 后再逐格修正（用户要求：翻转入口放这里，接管确认框里不要）；
+采纳时方向标记 red_at_top 同步取反。
 """
-from core.board import RED, BLACK, Board
+from core.board import RED, Board
 
 
-def test_takeover_dialog_flip_toggles_orientation_and_side(qapp):
-    from gui.takeover_dialog import TakeoverDialog
-    d = TakeoverDialog(red_at_top=True, window_title="测试窗口", n_pieces=32)
-    assert d.flip_orientation is False
-    assert "黑方" in d.rb_my_auto.text()          # 红在上 -> 推断执黑
-    d._toggle_flip()
-    assert d.flip_orientation is True
-    assert "红方" in d.rb_my_auto.text(), "翻转后推断应变执红"
-    d.accept()
-    assert d.my_color == RED
+def test_verify_dialog_flip_rotates_editor(qapp):
+    from gui.takeover_dialog import VerifyBoardDialog
+    g = [row[:] for row in Board().grid]
+    d = VerifyBoardDialog(grid=g, my_color=RED)
+    assert d.flipped is False
+    d._flip_board()
+    assert d.flipped is True
+    assert d.editor.get_grid() == [row[::-1] for row in g[::-1]], "整盘应旋转 180°"
+    d._flip_board()
+    assert d.flipped is False
+    assert d.editor.get_grid() == g, "翻两次应回到原状"
     d.deleteLater()
 
 
-def test_takeover_dialog_flip_twice_resets(qapp):
+def test_takeover_dialog_has_no_flip_button(qapp):
+    """翻转入口只在核对界面（接管确认框里不加，用户明确要求）。"""
     from gui.takeover_dialog import TakeoverDialog
-    d = TakeoverDialog(red_at_top=True, window_title="测试窗口", n_pieces=32)
-    d._toggle_flip()
-    d._toggle_flip()
-    assert d.flip_orientation is False, "翻两次应回到原方向"
-    d.accept()
-    assert d.my_color == BLACK
+    d = TakeoverDialog(red_at_top=True, window_title="t", n_pieces=32)
+    assert not hasattr(d, "btn_flip")
     d.deleteLater()
 
 
-def test_apply_orientation_flip_rotates_grid(qapp):
-    """翻转：red_at_top 取反 + 网格旋转 180°（行列同时反转）。"""
+def test_adoption_applies_verify_flip(qapp, monkeypatch):
+    """核对界面翻转后采纳：res.red_at_top 取反，棋局采用翻转后的网格。"""
+    from PyQt6.QtWidgets import QDialog
+    from gui import takeover_dialog as _td
     from gui.main_window import MainWindow
 
-    class _R:
+    w = MainWindow()
+    w._sync_hwnd = 12345
+    try:
+        w.engine.stop()
+    except Exception:
         pass
+    w.engine = None                      # 采纳流程里的分析触发直接短路
 
-    r = _R()
-    r.red_at_top = True
-    r.grid = [row[:] for row in Board().grid]
-    expect = [row[::-1] for row in r.grid[::-1]]
-    MainWindow._apply_orientation_flip(r)
-    assert r.red_at_top is False
-    assert r.grid == expect, "网格应旋转 180°"
-    # 再翻一次回到原状
-    MainWindow._apply_orientation_flip(r)
-    assert r.red_at_top is True
-    assert r.grid == Board().grid
+    grid = [row[:] for row in Board().grid]
+    flipped = [row[::-1] for row in grid[::-1]]
+
+    class FakeTakeover:
+        def __init__(self, *a, **k):
+            self.my_color = "w"
+            self.my_turn_now = True
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    class FakeVerify:
+        flipped = True
+
+        def __init__(self, *a, **k):
+            self.confirmed_grid = [r[:] for r in flipped]
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(_td, "TakeoverDialog", FakeTakeover)
+    monkeypatch.setattr(_td, "VerifyBoardDialog", FakeVerify)
+
+    res_grid = [r[:] for r in grid]      # 类体推导式拿不到函数局部变量
+
+    class _Res:
+        red_at_top = True
+        grid = res_grid
+        n_pieces = 32
+        board_box = (0.0, 0.0, 100.0, 100.0)
+        detections = []
+        corrections = []
+        error = None
+
+    res = _Res()
+    w._on_takeover_found({"hwnd": 99999, "res": res, "title": "t", "img": None})
+    assert res.red_at_top is False, "翻转后方向标记应取反"
+    assert w.game.board.grid == flipped, "棋局应采用翻转后的网格"
+    w._stop_sync()
