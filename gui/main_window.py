@@ -601,6 +601,11 @@ class MainWindow(QMainWindow):
         self._search_in_flight = False
         self._search_started_at = 0.0
         self._ponder_expected = iccs
+        # 预计算搜索的根局面是"预计对手走后"（我方该走）：info 回调按
+        # _search_stm 给评估贴视角——必须更新为我方，否则引擎以我方为正
+        # 的分数会被当成对手的视角，胜率条整个翻面
+        # （实际发生过：轮转后红90% 跳成黑90%）
+        self._search_stm = self.board.my_color
         self._sync_log(f"预计算开始：预计对手走 {iccs}，"
                        f"引擎提前思考我方应着（对手想多久、引擎算多久）")
 

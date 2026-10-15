@@ -165,3 +165,32 @@ def test_go_ponder_command_and_ponderhit():
     assert sent == ["go ponder depth 24 searchmoves a0a1"]
     e.ponderhit()
     assert sent[-1] == "ponderhit"
+
+
+def test_ponder_info_stm_keeps_red_perspective(qapp):
+    """预计算期间 info 的视角标记 must 是"被搜索局面的行棋方"=我方。
+
+    实际 bug：轮转后红方胜率 90% 跳到黑方 90%——预计算根局面是我方
+    该走（引擎分数以我方为正），却被贴上旧视角（对手），胜率条翻面。
+    """
+    w = _win_with_fake(qapp)
+    w.board.set_my_color(RED)
+    w.panel.set_my_color(RED)
+    w.game.reset(OPEN_BLACK_TURN)
+    w._expected_reply = "h9g7"
+    # 复现真实时序：此前刚跑过"对手局面"的分析（视角=黑），并且
+    # _search_fen 与当前局面一致（info 不会被过期守卫拦掉）
+    w._search_stm = "b"
+    w._search_fen = w.game.board.to_fen()
+    w._arm_ponder()
+    assert w._search_stm == RED, "预计算根局面是我方该走，视角应更新为我方"
+    # 预计算 info 以红方（我方）为正分：胜率条必须仍显示红方占优
+    w._engine_info_cb({"score": 300, "score_str": "+3.00", "multipv": 1,
+                       "depth": 20, "pv": ["g3g4"], "score_kind": "cp"})
+    assert w.panel.pv_lines, "预计算 info 应显示到面板"
+    top = w.panel.pv_lines[0]
+    assert top.get("stm") == RED, "info 应贴我方视角"
+    assert w.panel.eval_bar.value > 50, \
+        f"红方占优时胜率条应仍偏红，实际 {w.panel.eval_bar.value}"
+    assert "红方胜率" in w.panel.winrate_label.text()
+    w.engine.stop()
