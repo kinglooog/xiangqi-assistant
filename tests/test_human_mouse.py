@@ -169,3 +169,30 @@ def test_human_settings_applied_from_config(qapp, monkeypatch):
     assert capture_win.HUMAN_INPUT["method"] == "wind"
     assert capture_win.HUMAN_INPUT["speed"] == "slow"
     w.engine.stop() if w.engine else None
+
+
+def test_click_ultra_teleports_and_double_clicks(monkeypatch):
+    """极快档：不模拟轨迹，瞬时定位 + 直接按下抬起（两次点击走子）。"""
+    calls = []
+    monkeypatch.setattr(capture_win, "human_move_to",
+                        lambda *a, **k: calls.append("move"))
+    monkeypatch.setattr(capture_win.time, "sleep", lambda *_a: None)
+
+    class FakeU32:
+        def SetCursorPos(self, x, y):
+            calls.append(("pos", x, y))
+            return True
+
+        def mouse_event(self, flag, *_a):
+            calls.append("down" if flag == capture_win.MOUSEEVENTF_LEFTDOWN
+                         else "up")
+    monkeypatch.setattr(capture_win, "_user32", lambda: FakeU32())
+    old = dict(HUMAN_INPUT)
+    HUMAN_INPUT.update({"enabled": True, "speed": "ultra"})
+    try:
+        click_at(321, 654)
+    finally:
+        HUMAN_INPUT.update(old)
+    assert ("pos", 321, 654) in calls, "极快模式应瞬时定位"
+    assert "move" not in calls, "极快模式不模拟轨迹"
+    assert calls.count("down") == 1 and calls.count("up") == 1

@@ -481,6 +481,7 @@ def click_at(x: int, y: int) -> None:
     """把鼠标移到屏幕物理像素 (x, y) 并左键单击。
 
     默认走拟人轨迹（可在设置里关闭）：轨迹 -> 悬停 -> 按下 -> 按住 -> 抬起。
+    速度档 "ultra"（极快）：不模拟轨迹，瞬时定位 + 直接按下抬起。
     """
     import random
     if sys.platform != "win32":
@@ -489,6 +490,13 @@ def click_at(x: int, y: int) -> None:
     rng = random.Random()
     cfg = HUMAN_INPUT
     if cfg.get("enabled", True):
+        if cfg.get("speed") == "ultra":
+            # 极快：不模拟轨迹，光标瞬移到位直接点（两发点击即完成走子）
+            u32.SetCursorPos(int(x), int(y))
+            u32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.02)
+            u32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            return
         human_move_to(x, y, cfg.get("method", "jerk"), cfg.get("speed", "normal"), rng)
         time.sleep(rng.uniform(0.05, 0.15))             # 到位后短暂悬停
         u32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)

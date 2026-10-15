@@ -652,7 +652,12 @@ class MainWindow(QMainWindow):
         import capture_win
         try:
             self._clicking = True
-            time.sleep(0.25 + random.random() * 0.4)   # 拟人：先想一会儿
+            # 极快模式：不模拟轨迹（click_at 内部直点），延迟压到最短
+            ultra = self.config.get("human_speed") == "ultra"
+            if ultra:
+                time.sleep(0.04)
+            else:
+                time.sleep(0.25 + random.random() * 0.4)   # 拟人：先想一会儿
             # 尽力把对局窗口提到最前（Windows 前台锁可能拒绝，不作为拒绝条件）
             if capture_win.get_foreground_window() != self._sync_hwnd:
                 capture_win.set_topmost(self._sync_hwnd, True)
@@ -685,7 +690,8 @@ class MainWindow(QMainWindow):
                         return
                 capture_win.click_at(*pos)
                 if i == 0:
-                    time.sleep(0.16 + random.random() * 0.32)  # 两次点击间的拟人延迟
+                    time.sleep(0.04 if ultra
+                               else 0.16 + random.random() * 0.32)  # 两击间隔
         finally:
             self._clicking = False
 
@@ -2665,10 +2671,11 @@ class MainWindow(QMainWindow):
         i_p = self.combo_path.findData(self.config.get("human_path", "jerk"))
         self.combo_path.setCurrentIndex(i_p if i_p >= 0 else 0)
         self.combo_speed = QComboBox()
-        for label, key in (("快", "fast"), ("中", "normal"), ("慢", "slow")):
+        for label, key in (("极快（不模拟轨迹，直接两次点击）", "ultra"),
+                           ("快", "fast"), ("中", "normal"), ("慢", "slow")):
             self.combo_speed.addItem(label, key)
         i_s = self.combo_speed.findData(self.config.get("human_speed", "normal"))
-        self.combo_speed.setCurrentIndex(i_s if i_s >= 0 else 1)
+        self.combo_speed.setCurrentIndex(i_s if i_s >= 0 else 2)
         form.addRow(self.chk_human)
         form.addRow("轨迹算法", self.combo_path)
         form.addRow("操作速度", self.combo_speed)
@@ -2700,6 +2707,10 @@ class MainWindow(QMainWindow):
                 "model_name": self.combo_model.currentData(),
                 "sound": self.chk_sound.isChecked(),
                 "voice": self.chk_voice.isChecked(),
+                # 拟人化三项此前漏存：选完不落盘，重启即还原（实际发生过的坑）
+                "human_mouse": self.chk_human.isChecked(),
+                "human_path": self.combo_path.currentData(),
+                "human_speed": self.combo_speed.currentData(),
             })
             self._save_config()
             if self.engine is not None:
