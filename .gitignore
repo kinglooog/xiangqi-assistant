@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+
+# 打包产物（PyInstaller 本地生成）
+build/
+dist/
+dist_extra/
+
+# 检测模型与引擎二进制：用脚本下载，不入库
+#   .venv/Scripts/python tools/download_models.py
+#   .venv/Scripts/python tools/download_engine.py
+models/*.onnx
+engine/bin/*.exe
+engine/bin/*.nnue
+
+# 工具/会话产物
+.idea/
+.vscode/
+.zcode/
+
+# 运行时日志与诊断帧
+*.log
