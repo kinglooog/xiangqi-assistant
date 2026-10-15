@@ -315,6 +315,7 @@ class MainWindow(QMainWindow):
         self._ponder_discard = False      # 下一次 bestmove 属于被丢弃的预搜索
         self._ponder_expected = ""        # 预计对手会走的着法（ICCS）
         self._expected_reply = None       # 上一轮分析 PV 第二着（ICCS）
+        self._search_root_fen = None      # 被搜索局面的 fen（PV 翻译的基准）
         self._close_clicks = 0           # 本次结算的关弹窗点击次数（限次防误点）
         self._coord_clicks = 0           # 坐标兜底点击次数（限次）
         self._settling = False           # 接管时处于结算界面（棋盘不完整）
@@ -588,6 +589,14 @@ class MainWindow(QMainWindow):
             return                                   # 预测已过期（局面变了）
         iccs = move_to_iccs(e_mv)
         fen = self.game.board.to_fen()               # 我方走后的当前局面
+        # 预计算搜索的根局面 = 当前局面 + 预计对手着法：PV 中文翻译、
+        # 视角标记都以此为准（否则翻不出中文/评估正负号颠倒）
+        try:
+            _b2 = Board(fen)
+            _b2.make_move(e_mv)
+            self._search_root_fen = _b2.to_fen()
+        except Exception:
+            self._search_root_fen = fen
         self._ponder_discard = True                  # 先停掉残留搜索，其 bestmove 丢弃
         self._pondering = True                       # 守卫先立：旧 bestmove 一律忽略
         try:
@@ -626,6 +635,7 @@ class MainWindow(QMainWindow):
             self._search_in_flight = True
             self._search_started_at = time.time()
             self._search_fen = self.game.board.to_fen()
+            self._search_root_fen = self._search_fen
             self._last_pv_top = None
             self._sync_log(f"预计算命中 {exp}：引擎已提前算好，立即取应着")
             self._sync_status("预计算命中 ✓ 立即出着")
@@ -1200,9 +1210,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("对战已结束。")
 
     def _translate_pv(self, pv) -> list:
+        """把 ICCS 着法序列翻成中文记法。
+
+        必须从**被搜索的局面**回放（预计算搜索的是"预计对手走后"的局面，
+        与当前局面不同）：用当前局面回放会在第一步就不合法而中断，
+        面板只能回退显示 ICCS 编码串（实际发生过的 bug）。
+        """
         if not pv:
             return []
-        probe = Board(self.game.board.to_fen())
+        probe = Board(self._search_root_fen or self.game.board.to_fen())
         out = []
         for u in pv:
             try:
@@ -1273,6 +1289,7 @@ class MainWindow(QMainWindow):
         self._search_stm = self.game.side_to_move
         self._last_pv_top = None
         fen = self._search_fen
+        self._search_root_fen = fen       # PV 中文翻译以被搜索局面为基准
         self.panel.set_stm(self.game.side_to_move)
         self.panel.clear_analysis()
         # 对战模式统一用「用时上限 + 深度封顶」双限制：时间先到即停，
@@ -1507,6 +1524,7 @@ class MainWindow(QMainWindow):
         self._no_board_hb = 0.0
         self._grab_heal_at = 0.0
         self._relocate_at = 0.0
+        self._search_root_fen = None
         self._drop_ponder()
         self.observer.reset()
 

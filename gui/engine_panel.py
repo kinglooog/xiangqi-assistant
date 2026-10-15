@@ -262,8 +262,10 @@ class EnginePanel(QWidget):
 
     def _refresh_pv_list(self) -> None:
         self.pv_list.clear()
-        mover = "红" if self._stm == RED else "黑"
         for info in self.pv_lines:
+            # 标签用该条 info 自己的视角（预计算期间被搜索局面可能与
+            # 当前轮次不同，用面板 stm 会把"黑方候选着法"标成红方）
+            mover = "红" if info.get("stm", self._stm) == RED else "黑"
             cp = red_cp(info.get("score"), info.get("stm", self._stm))
             kind = info.get("score_kind", "cp")
             lead = self._fmt_lead(cp, kind)

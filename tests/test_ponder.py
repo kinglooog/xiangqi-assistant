@@ -194,3 +194,33 @@ def test_ponder_info_stm_keeps_red_perspective(qapp):
         f"红方占优时胜率条应仍偏红，实际 {w.panel.eval_bar.value}"
     assert "红方胜率" in w.panel.winrate_label.text()
     w.engine.stop()
+
+
+def test_ponder_pv_translated_from_searched_position(qapp):
+    """预计算 PV 的中文翻译必须基于被搜索局面（预计对手走后）。
+
+    实际 bug：用当前局面回放时第一步就不合法，面板回退显示 ICCS
+    编码串（"黑方的候选着法变成 b9c7 这种编码"）。
+    """
+    from core.board import BLACK
+    w = _win_with_fake(qapp)
+    w.board.set_my_color(BLACK)
+    w.panel.set_my_color(BLACK)
+    w.game.reset(OPEN_RED_TURN)          # 对手（红）该走：我方执黑
+    w.board.set_game(w.game)
+    w.panel.set_stm("w")                 # 面板视角=当前轮次（红）
+    w._expected_reply = "h2e2"           # 预计红方走炮二平五
+    w._search_stm = "w"
+    w._search_fen = w.game.board.to_fen()
+    w._arm_ponder()
+    assert w._search_root_fen is not None, "应记录被搜索局面"
+    # 预计算局面（红方已走 h2e2）里的黑方候选着法
+    w._engine_info_cb({"score": -80, "score_str": "-0.80", "multipv": 1,
+                       "depth": 18, "pv": ["b9c7", "h2e2"], "score_kind": "cp"})
+    top = w.panel.pv_lines[0]
+    assert top.get("pv_cn"), "PV 应翻译为中文记法，而不是编码串"
+    assert not str(top["pv_cn"][0]).startswith("b9"), \
+        f"不应显示 ICCS 编码串，实际 {top['pv_cn']}"
+    text = w.panel.pv_list.item(0).text()
+    assert "[黑方]" in text, f"候选着法标签应为被搜索方（黑），实际：{text}"
+    w.engine.stop()
