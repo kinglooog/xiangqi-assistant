@@ -25,3 +25,6 @@ engine/bin/*.nnue
 
 # 运行时日志与诊断帧
 *.log
+
+# 皮肤模板：运行时按你的核对自动重建，不入库（避免每局校准都产生脏改动）
+models/skin_templates.npz
