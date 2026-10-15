@@ -147,13 +147,19 @@ class UciEngine:
 
     def go(self, depth: int = None, movetime_ms: int = None,
            nodes: int = None, infinite: bool = False,
-           searchmoves: Optional[List[str]] = None) -> None:
+           searchmoves: Optional[List[str]] = None,
+           ponder: bool = False) -> None:
         """开始搜索（异步）。先 stop_search() 再重新 go()。
 
         searchmoves 为 ICCS 着法白名单（如 ['h2e2']）：只在这些着法里
         选最优——用于犯规规避时排除重复着法后重新搜索。
+        ponder=True 为预计算：position 命令的最后一步是"预计对手会走的
+        着法"，引擎照常深算但我方着法推迟到 ponderhit()/stop_search()
+        之后才输出。
         """
         cmd = "go"
+        if ponder:
+            cmd += " ponder"
         if depth is not None:
             cmd += f" depth {depth}"
         if movetime_ms is not None:
@@ -170,6 +176,14 @@ class UciEngine:
 
     def stop_search(self) -> None:
         self._send("stop")
+
+    def ponderhit(self) -> None:
+        """预计算命中：预计的对手着法真的走了——预搜索转正。
+
+        引擎继续在当前（已深算的）局面上搜索，按正常时限完成并输出
+        bestmove；我方随即 stop 即可立刻取回深算结果。
+        """
+        self._send("ponderhit")
 
     # ------------------------------------------------------------------ 内部
     def _send(self, cmd: str) -> None:

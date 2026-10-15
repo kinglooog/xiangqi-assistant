@@ -71,6 +71,8 @@ class MainWindow(QMainWindow):
     # 一键接管：工作线程 -> GUI 线程
     takeoverFound = pyqtSignal(dict)   # hwnd/res/my_color/my_turn/title/img
     takeoverStatus = pyqtSignal(str)
+    # 预计算命中后：等深算收尾取回 bestmove 的宽限（毫秒）
+    PONDER_HIT_GRACE_MS = 150
 
     def __init__(self):
         super().__init__()
@@ -307,6 +309,12 @@ class MainWindow(QMainWindow):
         self._sync_state = ""            # 同步循环状态（变化时写日志）
         self._last_mover_side = None     # 最近确认的走子方（推断轮次）
         self._pending_reply = None       # 两步合帧解释出的对手应着
+        # 后台预计算（ponder）：对手思考的十几秒里提前算好我方应着
+        self._pondering = False           # 预计算进行中
+        self._ponder_hit_pending = False  # 命中且已 ponderhit，等深算结果
+        self._ponder_discard = False      # 下一次 bestmove 属于被丢弃的预搜索
+        self._ponder_expected = ""        # 预计对手会走的着法（ICCS）
+        self._expected_reply = None       # 上一轮分析 PV 第二着（ICCS）
         self._close_clicks = 0           # 本次结算的关弹窗点击次数（限次防误点）
         self._coord_clicks = 0           # 坐标兜底点击次数（限次）
         self._settling = False           # 接管时处于结算界面（棋盘不完整）
@@ -417,8 +425,15 @@ class MainWindow(QMainWindow):
     @pyqtSlot(object)
     def _on_engine_bestmove(self, move):
         """GUI 线程处理引擎最佳着法。"""
+        # 预计算的守卫（放在最前）：预搜索/被中止搜索的 bestmove 不作数
+        if getattr(self, "_ponder_discard", False):
+            self._ponder_discard = False
+            return                      # 主动丢弃的预搜索结果：忽略
+        if getattr(self, "_pondering", False):
+            return                      # 预计算进行中：旧搜索的 bestmove 一律忽略
         self._search_in_flight = False
         self._search_started_at = 0.0
+        self._ponder_hit_pending = False    # 深算结果已到，命中流程结束
         if getattr(self, "_pending_analysis", False):
             self._pending_analysis = False
             self._trigger_analysis()
@@ -464,6 +479,12 @@ class MainWindow(QMainWindow):
             if res is None:
                 return     # 已派出"排除重复着法"的限制搜索，等它带回脱出着法
             mv, score_str = res
+            # 记录"预计对手应着"（PV 第二着），供对手回合的预计算使用
+            self._expected_reply = None
+            if self.panel.pv_lines:
+                pv = self.panel.pv_lines[0].get("pv") or []
+                if len(pv) >= 2 and pv[0] == move_to_iccs(mv):
+                    self._expected_reply = pv[1]
             cn = move_to_chinese(self.game.board, mv)
             self._auto_click_move(mv, cn, score_str)
             return
@@ -537,6 +558,112 @@ class MainWindow(QMainWindow):
             return True                      # 尚无观察数据，交给后续同步兜底
         return all(obs.grid[r][c] == self.game.board.grid[r][c]
                    for r in range(10) for c in range(9))
+
+    def _arm_ponder(self) -> None:
+        """对手回合：让引擎按"预计应着"预计算（后台提前算好我方下一着）。
+
+        人类对手通常思考十几秒——这段时间引擎提前深算我方应着；
+        对手真的走预计的着法时（ponderhit）立即取回深算结果，
+        1.5 秒的出着等待几乎归零。
+        """
+        if self.engine is None or not self.engine.is_running():
+            return
+        if getattr(self, "_pondering", False) or \
+                getattr(self, "_ponder_hit_pending", False):
+            return                                   # 已在预计算/取着流程中
+        if not (self.chk_auto.isChecked() or self._takeover):
+            return
+        if self.board.my_color is None or self.game.result is not None:
+            return
+        if self.game.side_to_move == self.board.my_color:
+            return                                   # 不是对手回合
+        expected = getattr(self, "_expected_reply", None)
+        if not expected:
+            return
+        try:
+            e_mv = iccs_to_move(expected)
+        except Exception:
+            return
+        if not self.game.board.is_legal_move(e_mv):
+            return                                   # 预测已过期（局面变了）
+        iccs = move_to_iccs(e_mv)
+        fen = self.game.board.to_fen()               # 我方走后的当前局面
+        self._ponder_discard = True                  # 先停掉残留搜索，其 bestmove 丢弃
+        self._pondering = True                       # 守卫先立：旧 bestmove 一律忽略
+        try:
+            self.engine.stop_search()
+            self.engine.position(fen, [iccs])        # 最后一步 = 预计对手着法
+            self.engine.go(depth=self.config["depth"], ponder=True)
+        except Exception:
+            self._pondering = False
+            self._ponder_discard = False
+            return
+        self._search_in_flight = False
+        self._search_started_at = 0.0
+        self._ponder_expected = iccs
+        self._sync_log(f"预计算开始：预计对手走 {iccs}，"
+                       f"引擎提前思考我方应着（对手想多久、引擎算多久）")
+
+    def _resolve_ponder(self, actual: Move) -> None:
+        """对手着法落定：预计算命中 -> 复用深算；未命中 -> 丢弃重算。
+
+        必须在对手着法写入棋局之后、`_refresh_all()` 触发新分析之前调用。
+        """
+        if not getattr(self, "_pondering", False):
+            return
+        exp = self._ponder_expected or ""
+        self._pondering = False
+        if self.engine is None or not self.engine.is_running():
+            return
+        if move_to_iccs(actual) == exp:
+            # 命中：引擎已在这条线上深算数秒——转正后短宽限取出着法
+            self._ponder_hit_pending = True
+            self._search_in_flight = True
+            self._search_started_at = time.time()
+            self._search_fen = self.game.board.to_fen()
+            self._last_pv_top = None
+            self._sync_log(f"预计算命中 {exp}：引擎已提前算好，立即取应着")
+            self._sync_status("预计算命中 ✓ 立即出着")
+            try:
+                self.engine.ponderhit()
+            except Exception:
+                pass
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(self.PONDER_HIT_GRACE_MS, self._finish_ponder_hit)
+        else:
+            self._sync_log(f"预计算未命中（实际 {move_to_iccs(actual)} ≠ "
+                           f"预计 {exp or '无'}）——按常规重新分析")
+            self._ponder_discard = True              # 丢弃该预搜索的 bestmove
+            try:
+                self.engine.stop_search()
+            except Exception:
+                self._ponder_discard = False
+            self._search_in_flight = False
+            self._pending_analysis = False
+
+    def _finish_ponder_hit(self) -> None:
+        """命中宽限到期：冻结深算结果，让 bestmove 回调把着法取回来。"""
+        if not getattr(self, "_ponder_hit_pending", False):
+            return
+        try:
+            self.engine.stop_search()
+        except Exception:
+            pass
+
+    def _drop_ponder(self) -> None:
+        """清掉预计算状态（停止接管/换局/重同步时调用）。"""
+        active = (getattr(self, "_pondering", False)
+                  or getattr(self, "_ponder_hit_pending", False))
+        self._pondering = False
+        self._ponder_hit_pending = False
+        self._ponder_expected = ""
+        self._expected_reply = None
+        if active and self.engine is not None:
+            self._ponder_discard = True
+            try:
+                self.engine.stop_search()
+            except Exception:
+                self._ponder_discard = False
 
     def _foul_avoid(self, mv: Move, score_str: str):
         """禁止着法规避（长将/长捉）：引擎着法若会继续犯规循环，换着法。
@@ -874,6 +1001,7 @@ class MainWindow(QMainWindow):
         my_color = BLACK if res.red_at_top else RED
         stm = RED                      # 象棋红先行
         fen = grid_to_fen(res.grid, side_to_move=stm)
+        self._drop_ponder()            # 新对局：旧预计算作废
         self.game.reset(fen)
         self._fix_turn_by_check()          # 同理：被将军方必是走棋方
         self.board.set_game(self.game)
@@ -1098,6 +1226,10 @@ class MainWindow(QMainWindow):
         restrict = getattr(self, "_search_restrict", None)
         self._search_restrict = None
         if self.engine is None:
+            return
+        # 预计算期间不打断：进行中等对手走子（异局面），命中待取着法时不重算
+        if getattr(self, "_pondering", False) or \
+                getattr(self, "_ponder_hit_pending", False):
             return
         if not (self.chk_analyze.isChecked() or self.playing or self._takeover):
             return
@@ -1370,6 +1502,7 @@ class MainWindow(QMainWindow):
         self._no_board_hb = 0.0
         self._grab_heal_at = 0.0
         self._relocate_at = 0.0
+        self._drop_ponder()
         self.observer.reset()
 
     def _probe_worker(self):
@@ -1771,6 +1904,7 @@ class MainWindow(QMainWindow):
 
     def _stop_sync(self):
         self._sync_timer.stop()
+        self._drop_ponder()
         self._sync_hwnd = None
         self._stop_takeover_cleanup()
         if self._sct is not None:
@@ -2303,6 +2437,7 @@ class MainWindow(QMainWindow):
                     cn = move_to_chinese(self.game.board, mv)
                 except Exception:
                     cn = move_to_iccs(mv)
+                mover_before = self.game.side_to_move
                 if self.game.play(mv):
                     if self._auto_click_pending and                             move_to_iccs(self._auto_click_pending["move"]) == move_to_iccs(mv):
                         self._auto_click_pending = None   # 代点已被窗口画面确认
@@ -2315,6 +2450,10 @@ class MainWindow(QMainWindow):
                     self._last_mover_side = ("b" if self.game.side_to_move == "w"
                                              else "w")
                     self._confirm_opening_move(mv)     # 开局着法已确认走出
+                    # 对手着法落定：先结清预计算（命中则直接复用深算，省掉整次重算）
+                    if (self.board.my_color is not None
+                            and mover_before != self.board.my_color):
+                        self._resolve_ponder(mv)
                     self._refresh_all()
                     who = "红" if self.game.side_to_move == "b" else "黑"
                     self._sync_log(f"同步着法：{who}方 {cn}（推断分 {score:.3f}）")
@@ -2324,12 +2463,20 @@ class MainWindow(QMainWindow):
                         if self.game.play(reply):
                             self.board.animate_move(
                                 reply, self.game.board.piece_at(*reply[1]))
+                            if self.board.my_color is not None:
+                                self._resolve_ponder(reply)
                             self._refresh_all()
                             self._last_mover_side = self.game.side_to_move
                             self._sync_log("同步着法：对手应着（两步合帧解释）")
                         else:
                             self._auto_resync_to_window(res, None)
                     self._sync_status(f"已自动同步着法：{cn}")
+                    # 落定后若轮到对手：让引擎预计算我方应着——代替原本
+                    # 送给"对手局面"的无用分析（对手是人类，不会照它走）
+                    if (self.board.my_color is not None
+                            and self.game.result is None
+                            and self.game.side_to_move != self.board.my_color):
+                        self._arm_ponder()
                 else:
                     self._sync_log(f"推断着法({move_to_iccs(mv)})落子失败"
                                    f"——自动以 JJ 局面为准重新同步")
@@ -2449,6 +2596,7 @@ class MainWindow(QMainWindow):
         self._sync_log(f"重新同步：局面取自 JJ，轮到 "
                        f"{'红' if stm == 'w' else '黑'}方")
         fen = grid_to_fen(res.grid, side_to_move=stm)
+        self._drop_ponder()            # 局面以 JJ 为准重置：预计算作废
         self.game.reset(fen)
         self._fix_turn_by_check()          # 轮次猜错时按"被将军方该走"自动纠正
         self.board.set_game(self.game)
@@ -2478,6 +2626,7 @@ class MainWindow(QMainWindow):
             self._sync_status("当前画面未识别到棋盘，无法重新同步。")
             return
         self.observer.force_baseline(res.grid, res.red_at_top)
+        self._drop_ponder()
         # 手动重新同步 = 用户显式要求重试：解除引擎崩溃局面黑名单
         # （否则同一局面重新同步后依然"暂停送分析"，永远无着法）
         self._engine_kill_fen = None

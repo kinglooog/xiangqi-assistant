@@ -1,0 +1,167 @@
+# -*- coding: utf-8 -*-
+"""后台预计算（ponder）测试：挂起、命中复用、未命中丢弃、各守卫。
+
+不启动真实引擎：_FakeEngine 记录调用序列。协议本身已在真机实测：
+`go ponder` 期间 bestmove 被引擎压住；ponderhit 后 0.02s 出着；
+未命中时 stop 也能 0.02s 取回（丢弃即可）。
+"""
+from core.board import RED, iccs_to_move
+
+OPEN_BLACK_TURN = ("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/"
+                   "1C5C1/9/RNBAKABNR b - - 0 1")
+OPEN_RED_TURN = ("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/"
+                 "1C5C1/9/RNBAKABNR w - - 0 1")
+
+
+class _FakeEngine:
+    def __init__(self):
+        self.calls = []
+        self._running = True
+
+    def is_running(self):
+        return self._running
+
+    def stop_search(self):
+        self.calls.append(("stop",))
+
+    def position(self, fen, moves=None):
+        self.calls.append(("position", fen, tuple(moves or [])))
+
+    def go(self, **kw):
+        self.calls.append(("go", kw))
+
+    def ponderhit(self):
+        self.calls.append(("ponderhit",))
+
+    def stop(self):
+        self._running = False
+
+
+def _win_with_fake(qapp):
+    from gui.main_window import MainWindow
+    w = MainWindow()
+    w._sync_hwnd = 12345
+    w._takeover = True
+    try:
+        w.engine.stop()
+    except Exception:
+        pass
+    w.engine = _FakeEngine()
+    return w
+
+
+def test_arm_ponder_sends_pondered_search(qapp):
+    w = _win_with_fake(qapp)
+    w.board.set_my_color(RED)
+    w.game.reset(OPEN_BLACK_TURN)
+    w._expected_reply = "h9g7"
+    w._arm_ponder()
+    assert w._pondering is True
+    assert w._ponder_expected == "h9g7"
+    pos = [c for c in w.engine.calls if c[0] == "position"][-1]
+    assert pos[2] == ("h9g7",), "position 最后一步应是预计的对手着法"
+    go_kw = [c[1] for c in w.engine.calls if c[0] == "go"][-1]
+    assert go_kw.get("ponder") is True, "应发 go ponder"
+    assert not go_kw.get("movetime_ms"), "预计算不设时间上限（对手想多久算多久）"
+    w.engine.stop()
+
+
+def test_arm_ponder_skips_when_not_opponent_turn(qapp):
+    w = _win_with_fake(qapp)
+    w.board.set_my_color(RED)
+    w.game.reset(OPEN_RED_TURN)          # 轮到我方
+    w._expected_reply = "h2e2"
+    w._arm_ponder()
+    assert w._pondering is False
+    assert not any(c[0] == "go" for c in w.engine.calls)
+    w.engine.stop()
+
+
+def test_arm_ponder_skips_when_prediction_stale(qapp):
+    """预测着法在当前局面不合法（局面变了）时不挂预计算。"""
+    w = _win_with_fake(qapp)
+    w.board.set_my_color(RED)
+    w.game.reset(OPEN_BLACK_TURN)
+    w._expected_reply = "a0a1"           # 红方着法，黑方回合走不了
+    w._arm_ponder()
+    assert w._pondering is False
+    w.engine.stop()
+
+
+def test_resolve_ponder_hit_reuses_deep_search(qapp):
+    w = _win_with_fake(qapp)
+    w.board.set_my_color(RED)
+    w.game.reset(OPEN_BLACK_TURN)
+    w._expected_reply = "h9g7"
+    w._arm_ponder()
+    assert w.game.play(iccs_to_move("h9g7"))     # 对手真走了预计着
+    w._resolve_ponder(iccs_to_move("h9g7"))
+    assert w._ponder_hit_pending is True
+    assert w._pondering is False
+    assert ("ponderhit",) in w.engine.calls, "命中应发 ponderhit"
+    assert w._search_fen == w.game.board.to_fen()
+    assert w._search_in_flight is True
+    w._finish_ponder_hit()                        # 宽限到期：冻结深算取着
+    assert w.engine.calls[-1] == ("stop",)
+    w.engine.stop()
+
+
+def test_resolve_ponder_miss_discards_result(qapp):
+    w = _win_with_fake(qapp)
+    w.board.set_my_color(RED)
+    w.game.reset(OPEN_BLACK_TURN)
+    w._expected_reply = "h9g7"
+    w._arm_ponder()
+    assert w.game.play(iccs_to_move("b9c7"))      # 对手走了别的着法
+    w._resolve_ponder(iccs_to_move("b9c7"))
+    assert w._pondering is False and w._ponder_hit_pending is False
+    assert ("stop",) in w.engine.calls
+    assert w._ponder_discard is True, "应丢弃预搜索的残留 bestmove"
+    w._on_engine_bestmove("h2e2")                 # 残留 bestmove：被吞掉
+    assert w._ponder_discard is False
+    w.engine.stop()
+
+
+def test_bestmove_swallowed_while_pondering(qapp, monkeypatch):
+    w = _win_with_fake(qapp)
+    calls = []
+    monkeypatch.setattr(w, "_click_worker", lambda m: calls.append(m))
+    w._pondering = True
+    w._on_engine_bestmove("h2e2")
+    assert not calls, "预计算期间不应应用任何 bestmove"
+    w.engine.stop()
+
+
+def test_trigger_analysis_skipped_during_ponder_flow(qapp):
+    w = _win_with_fake(qapp)
+    w.chk_analyze.setChecked(True)
+    w._ponder_hit_pending = True
+    w._trigger_analysis()
+    assert not any(c[0] == "go" for c in w.engine.calls), \
+        "命中待取着法时不应重发 go（打断深算）"
+    w.engine.stop()
+
+
+def test_drop_ponder_clears_state(qapp):
+    w = _win_with_fake(qapp)
+    w.board.set_my_color(RED)
+    w.game.reset(OPEN_BLACK_TURN)
+    w._expected_reply = "h9g7"
+    w._arm_ponder()
+    assert w._pondering is True
+    w._drop_ponder()
+    assert w._pondering is False and w._ponder_hit_pending is False
+    assert w._ponder_expected == "" and w._expected_reply is None
+    assert w._ponder_discard is True
+    w.engine.stop()
+
+
+def test_go_ponder_command_and_ponderhit():
+    from engine.uci import UciEngine
+    e = UciEngine.__new__(UciEngine)
+    sent = []
+    e._send = sent.append
+    e.go(depth=24, ponder=True, searchmoves=["a0a1"])
+    assert sent == ["go ponder depth 24 searchmoves a0a1"]
+    e.ponderhit()
+    assert sent[-1] == "ponderhit"
