@@ -1597,8 +1597,12 @@ class MainWindow(QMainWindow):
                 wins.append(w)
         if rejected:
             log("未入候选 " + str(len(rejected)) + " 个: " + " | ".join(rejected))
-        log("进入候选 " + str(len(wins)) + " 个: "
+        # 探测优先级：模拟器（MuMu 等）先试——找不到棋盘再退回试浏览器
+        # 等其它窗口（JJ 网页版等）；同组内大窗口优先（更可能是对局界面）
+        wins.sort(key=lambda w: self._probe_priority(w["title"], w.get("rect")))
+        log("进入候选 " + str(len(wins)) + " 个（探测顺序）: "
             + "; ".join(f"“{w['title'][:20]}”" for w in wins))
+        self._probe_tried_emu = False
         if not wins:
             log("探测结束：没有可探测的窗口")
             minimized_n = sum(1 for r in rejected if "已最小化" in r)
@@ -1614,6 +1618,14 @@ class MainWindow(QMainWindow):
         try:
             for i, winfo in enumerate(wins):
                 title = winfo["title"][:30]
+                if self._looks_like_emulator(winfo["title"]):
+                    self._probe_tried_emu = True
+                elif (getattr(self, "_probe_tried_emu", False)
+                        and not getattr(self, "_probe_emu_note", False)):
+                    self._probe_emu_note = True
+                    log("模拟器窗口未找到棋盘——继续尝试浏览器等其它窗口")
+                    self.takeoverStatus.emit(
+                        "模拟器里没找到棋盘，继续查找浏览器等其它窗口…")
                 self.takeoverStatus.emit(
                     f"探测窗口 {i + 1}/{len(wins)}：{title} …")
                 grids = []
@@ -1724,11 +1736,12 @@ class MainWindow(QMainWindow):
             if fail_reasons:
                 self.takeoverStatus.emit(
                     f"未找到含棋盘的窗口（{fail_reasons[-1]}）。"
+                    f"已先试模拟器、再试浏览器等其它窗口——"
                     f"请确认棋盘完整可见、无弹窗遮挡后重试。")
             else:
                 self.takeoverStatus.emit(
-                    "未找到含棋盘的窗口。请确认已进入 JJ 对局界面"
-                    "（不是大厅），窗口未最小化，再重试。")
+                    "未找到含棋盘的窗口（已先试模拟器、再试浏览器等其它窗口）。"
+                    "请确认已进入 JJ 对局界面（不是大厅），窗口未最小化，再重试。")
             log("探测结束：未找到含棋盘的窗口。原始窗口全量清单：")
             try:
                 for w in capture_win.list_all_toplevel_windows():
@@ -1987,6 +2000,21 @@ class MainWindow(QMainWindow):
         return any(k in t for k in (
             "mumu", "模拟器", "安卓设备", "雷电", "ldplayer", "bluestacks",
             "nox", "夜神", "memu", "逍遥"))
+
+    @staticmethod
+    def _probe_priority(title: str, rect=None):
+        """一键接管的窗口探测顺序：(组, -面积)。
+
+        组 0 = 模拟器（MuMu 等，优先——裁剪/点击逻辑不变）；
+        组 1 = 其它窗口（浏览器里的 JJ 网页版等兜底）。
+        同组内大窗口优先（更可能是对局界面）。
+        """
+        emu = 0 if MainWindow._looks_like_emulator(title) else 1
+        if rect:
+            area = max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1])
+        else:
+            area = 0
+        return (emu, -area)
 
     def _grab_fail_heal(self) -> None:
         """抓屏失败的自愈：最小化 -> 自动恢复；句柄失效 -> 静默重定位。

@@ -83,3 +83,23 @@ def test_adoption_applies_verify_flip(qapp, monkeypatch):
     assert res.red_at_top is False, "翻转后方向标记应取反"
     assert w.game.board.grid == flipped, "棋局应采用翻转后的网格"
     w._stop_sync()
+
+
+def test_probe_priority_emulator_first_then_others(qapp):
+    """一键接管探测顺序：模拟器优先，其次其它窗口按面积从大到小。
+
+    用户场景：MuMu 里没进对局时，退回找浏览器里的棋局（JJ 网页版等）。
+    """
+    from gui.main_window import MainWindow
+    wins = [
+        {"title": "Microsoft Edge · JJ象棋网页版", "rect": (0, 0, 1200, 800)},
+        {"title": "MuMu安卓设备", "rect": (0, 0, 614, 1140)},
+        {"title": "记事本", "rect": (0, 0, 400, 300)},
+        {"title": "MuMu模拟器", "rect": (0, 0, 1500, 900)},
+    ]
+    wins.sort(key=lambda w: MainWindow._probe_priority(w["title"], w["rect"]))
+    titles = [w["title"] for w in wins]
+    assert titles[0].startswith("MuMu") and titles[1].startswith("MuMu"), \
+        f"模拟器应优先：{titles}"
+    assert titles[2].startswith("Microsoft Edge"), f"其后按面积排序：{titles}"
+    assert titles[3].startswith("记事本")
