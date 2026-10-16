@@ -684,3 +684,47 @@ def test_synced_move_clears_stale_arrow(qapp):
                           _res(observed))
     assert w.board.best_move is None, "同步出着法后旧箭头应被清掉"
     w.engine.stop() if w.engine else None
+
+
+def test_detect_systematic_shift():
+    """识别整体偏移（遮挡伪影）的检测：偏移帧报出、正常帧不误报。"""
+    from gui.main_window import MainWindow
+    local = [[None] * 9 for _ in range(10)]
+    for (r, c, p) in ((0, 3, "a"), (0, 4, "k"), (1, 4, "a"),
+                      (3, 0, "p"), (3, 1, "R"), (7, 6, "N"),
+                      (9, 4, "K"), (9, 5, "A")):
+        local[r][c] = p
+    # 观测 = 本地整体左移一格，且遮挡少了几颗
+    shifted = [[None] * 9 for _ in range(10)]
+    for r in range(10):
+        for c in range(1, 9):
+            shifted[r][c - 1] = local[r][c]
+    shifted[0][0] = None
+    s = MainWindow._detect_systematic_shift(local, shifted)
+    assert s is not None, "整体偏移帧应当被识别出来"
+    assert "列-1" in s
+    # 完全一致 -> 不报
+    assert MainWindow._detect_systematic_shift(local, local) is None
+    # 正常的一步着法差异 -> 不报
+    moved = [row[:] for row in local]
+    moved[7][6] = None
+    moved[5][5] = "N"
+    assert MainWindow._detect_systematic_shift(local, moved) is None
+
+
+def test_auto_resync_refuses_shifted_frame(qapp):
+    """疑似整体偏移的观测帧不得被采纳为真相（棋局保持不变）。"""
+    w = _win(qapp)
+    w.board.set_my_color(RED)
+    w.game.reset("3a1k3/9/9/2C6/9/9/4P4/9/9/3AKA3 w - - 0 1")
+    local = [row[:] for row in w.game.board.grid]
+    shifted = [[None] * 9 for _ in range(10)]
+    for r in range(10):
+        for c in range(1, 9):
+            shifted[r][c - 1] = local[r][c]
+    before = w.game.board.to_fen()
+    w._last_auto_resync = 0.0
+    w._auto_resync_to_window(_res(shifted), None)
+    assert w.game.board.to_fen() == before, "偏移帧不应被采纳"
+    assert getattr(w, "_shift_guard_n", 0) == 1
+    w.engine.stop() if w.engine else None

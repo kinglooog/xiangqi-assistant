@@ -1533,6 +1533,7 @@ class MainWindow(QMainWindow):
         self._grab_heal_at = 0.0
         self._relocate_at = 0.0
         self._search_root_fen = None
+        self._shift_guard_n = 0
         self._drop_ponder()
         self.observer.reset()
 
@@ -1550,11 +1551,12 @@ class MainWindow(QMainWindow):
                 pass
 
         try:
-            _fp_path = os.path.join(
+            _base = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "recognition", "yolo_board.py")
-            _fp = time.strftime("%m-%d %H:%M",
-                                time.localtime(os.path.getmtime(_fp_path)))
+                "recognition")
+            _fp = time.strftime("%m-%d %H:%M", time.localtime(max(
+                os.path.getmtime(os.path.join(_base, f))
+                for f in ("yolo_board.py", "pipeline.py", "skin.py"))))
         except Exception:
             _fp = "?"
         log(f"开始接管：自动寻找含棋盘的窗口（pid={os.getpid()}，"
@@ -2570,6 +2572,43 @@ class MainWindow(QMainWindow):
                        f"故应由该方走棋（原推断有误）")
         return True
 
+    @staticmethod
+    def _detect_systematic_shift(local_grid, observed, max_shift: int = 2):
+        """观测帧是否只是本地棋盘的整体偏移（遮挡导致的映射伪影）。
+
+        返回描述字符串（如 "(行+0, 列+1)"）；不疑似偏移返回 None。
+        判据：某个非零偏移的吻合度明显高于原地吻合度。遮挡只会"少棋子"、
+        不会凭空多出，因此无法解释的观测棋子额外扣分（权重 2）。
+        """
+        def fit(dr, dc):
+            matched = extra = 0
+            for r in range(10):
+                for c in range(9):
+                    obs_p = observed[r][c]
+                    if obs_p is None:
+                        continue
+                    sr, sc = r - dr, c - dc
+                    local_p = (local_grid[sr][sc]
+                               if (0 <= sr < 10 and 0 <= sc < 9) else None)
+                    if local_p == obs_p:
+                        matched += 1
+                    else:
+                        extra += 1
+            return matched - 2 * extra
+
+        base = fit(0, 0)
+        best_shift, best_score = None, base
+        for dr in range(-max_shift, max_shift + 1):
+            for dc in range(-max_shift, max_shift + 1):
+                if dr == 0 and dc == 0:
+                    continue
+                sc_ = fit(dr, dc)
+                if sc_ > best_score:
+                    best_shift, best_score = (dr, dc), sc_
+        if best_shift is not None and best_score >= base + 3 and best_score >= 6:
+            return f"(行{best_shift[0]:+d}, 列{best_shift[1]:+d})"
+        return None
+
     def _auto_resync_to_window(self, res, mover_side: Optional[str]):
         """本地棋盘与 JJ 脱节时，以 JJ 窗口局面为准自动重新同步（自愈）。
 
@@ -2586,6 +2625,24 @@ class MainWindow(QMainWindow):
             self._sync_log(f"拒绝采纳残缺帧（{reason}）——等待完整帧")
             self._sync_status("捕获画面不完整，等待下一帧自动校准…")
             return
+        # 系统性偏移守卫：弹窗/横幅遮住棋盘某条边时，模型会把棋盘框拟合到
+        # "可见的那部分网格"上——整盘偏移一格却依然"看着合法"（比例和将帅
+        # 位置都过得去）。这种帧绝不能当真相采纳（实际发生过：整体左移一格
+        # 被采纳，本地棋盘全乱）。遮挡消失后画面自然一致，无需采纳。
+        shift = self._detect_systematic_shift(self.game.board.grid, res.grid)
+        if shift is not None:
+            n_ref = getattr(self, "_shift_guard_n", 0) + 1
+            self._shift_guard_n = n_ref
+            if n_ref < 8:
+                self._last_auto_resync = 0.0     # 不限频：下一帧继续判定
+                self._sync_log(f"疑似遮挡导致识别整体偏移 {shift}——忽略本帧"
+                               f"（第 {n_ref} 次）")
+                self._sync_status("画面疑似被弹窗遮挡、识别发生整体偏移，"
+                                  "等待画面恢复…", sticky=True)
+                return
+            self._sync_log(f"识别偏移已持续 {n_ref} 帧——不再等待，"
+                           f"仍按 JJ 局面采纳")
+        self._shift_guard_n = 0
         self._last_auto_resync = now
         # 重同步后，此前记录的"抬子等待"状态已失效
         self._lift_key = None
