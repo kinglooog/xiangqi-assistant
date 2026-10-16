@@ -83,8 +83,10 @@ class MainWindow(QMainWindow):
         self.config = self._load_config()
         self.game = Game()
         self.engine: Optional[UciEngine] = None
-        self.sound = SoundManager(enabled=self.config.get("sound", True),
-                                  voice=self.config.get("voice", True))
+        # 启动默认静音（用户要求）：界面上的 🔊/🔇 按钮可随时开声
+        self.config["sound"] = False
+        self.config["voice"] = False
+        self.sound = SoundManager(enabled=False, voice=False)
         self.bridge = EngineBridge()
         self.bridge.info.connect(self._on_engine_info)
         self.bridge.bestmove.connect(self._on_engine_bestmove)
@@ -164,8 +166,15 @@ class MainWindow(QMainWindow):
         self.chk_analyze = QCheckBox("持续引擎分析")
         self.chk_analyze.setChecked(True)
         self.btn_settings = QPushButton("引擎设置...")
+        # 静音开关（启动默认静音）
+        self.btn_mute = QPushButton("🔇 已静音")
+        self.btn_mute.setCheckable(True)
+        self.btn_mute.setChecked(True)
+        self.btn_mute.setToolTip("静音开关：关闭/开启音效与绝杀语音播报"
+                                 "（启动默认静音）")
         controls2.addWidget(self.chk_analyze)
         controls2.addWidget(self.btn_settings)
+        controls2.addWidget(self.btn_mute)
         right_layout.addLayout(controls2)
 
         # 一键接管
@@ -188,7 +197,10 @@ class MainWindow(QMainWindow):
         for name, tip, _moves in OPENINGS:
             label = name if not tip else f"{name}（{tip}）"
             self.combo_opening.addItem(label or "默认（引擎选最优）", name)
-        idx0 = self.combo_opening.findData(self.config.get("opening", ""))
+        # 启动默认"引擎最优"（用户要求：不要一开软件就是双铁滑车）。
+        # 中途选的开局当次会话有效，重启后回到引擎最优。
+        self.config["opening"] = ""
+        idx0 = self.combo_opening.findData("")
         self.combo_opening.setCurrentIndex(idx0 if idx0 >= 0 else 0)
         self.combo_opening.setToolTip(
             "接管期间：轮到我方时优先走该开局的着法，走完（或不可行）后\n"
@@ -286,6 +298,7 @@ class MainWindow(QMainWindow):
         self.btn_undo.clicked.connect(self._undo)
         self.btn_flip.clicked.connect(self._flip)
         self.btn_settings.clicked.connect(self._open_settings)
+        self.btn_mute.toggled.connect(self._toggle_mute)
         self.chk_analyze.toggled.connect(self._toggle_analysis)
         self.rb_mode_play.toggled.connect(self._on_mode_changed)
         self.btn_battle.clicked.connect(self._toggle_battle)
@@ -296,6 +309,7 @@ class MainWindow(QMainWindow):
         self.btn_takeover.clicked.connect(self._toggle_takeover)
         self.takeoverFound.connect(self._on_takeover_found)
         self.takeoverStatus.connect(self._sync_status)
+        self._refresh_mute_btn()          # 初始状态与配置一致（默认静音）
 
         self._sync_hwnd = None
         self._sct = None
@@ -2865,6 +2879,25 @@ class MainWindow(QMainWindow):
                 f"已接管局面：我方执{side}。对方走子后请在棋盘上把对方棋子拖到目标位置。")
 
     # ---------------------------------------------------------------- 设置
+    def _toggle_mute(self, muted: bool) -> None:
+        """静音开关：静音时关闭音效与绝杀语音播报，开声时一并恢复。"""
+        self.config["sound"] = not muted
+        self.config["voice"] = not muted
+        self.sound.set_enabled(not muted)
+        self.sound.set_voice(not muted)
+        self._refresh_mute_btn()
+        self.statusBar().showMessage(
+            "已静音（点「🔇 已静音」恢复声音）" if muted else "声音已开启",
+            4000)
+
+    def _refresh_mute_btn(self) -> None:
+        """按当前配置刷新静音按钮的文字/勾选状态。"""
+        if not hasattr(self, "btn_mute"):
+            return
+        muted = not self.config.get("sound", False)
+        self.btn_mute.setChecked(muted)          # 状态相同则不发信号
+        self.btn_mute.setText("🔇 已静音" if muted else "🔊 声音开")
+
     def _apply_human_mouse(self) -> None:
         """把拟人化鼠标设置应用到输入层（点击时即时生效）。"""
         try:
@@ -2984,6 +3017,7 @@ class MainWindow(QMainWindow):
                 self.engine.set_engine_options(multipv=self.config["multipv"])
             self.sound.set_enabled(self.config["sound"])
             self.sound.set_voice(self.config["voice"])
+            self._refresh_mute_btn()
             self._apply_human_mouse()
             self.statusBar().showMessage("设置已保存（线程/置换表重启后生效）")
 
