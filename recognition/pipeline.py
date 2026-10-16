@@ -110,22 +110,32 @@ def recognize_screenshot(img_bgr: np.ndarray,
                 br = board_from_detections(dets, img=img_bgr,
                                            skin_templates=templates)
                 if br is not None and br.n_pieces >= 4:
+                    # 统一"先裁剪再识别"：不论整窗结果好坏，都优先在裁剪图上
+                    # 出结果（裁剪排除鼓/旗/凳装饰与工具栏——那是"多出一个
+                    # 炮/相"这类误检的来源，准确率更高；实测同皮肤裁剪后
+                    # 识别完全正确）。裁剪框：整窗框可信则贴棋盘框+半格，
+                    # 否则用"棋子范围+1.5 格"（某边棋子漏检时更耐操）
                     ok_box, _why = board_plausibility(br)
+                    cbox = (_tight_crop_box(br.board_box, img_bgr.shape)
+                            if ok_box else None)
+                    if cbox is None:
+                        cbox = _crop_box_from_dets(dets, img_bgr.shape)
+                    if cbox is not None:
+                        cropped = _recognize_cropped_image(img_bgr, cbox, det,
+                                                           templates)
+                        if cropped is not None:
+                            tight = (_tight_crop_box(cropped.board_box,
+                                                     img_bgr.shape) or cbox)
+                            _crop_cache.update(shape=img_bgr.shape[:2],
+                                               box=tight)
+                            return cropped
+                    # 裁剪不可用（无框/被裁坏/校验不过）：整窗结果兜底
                     if ok_box:
-                        # 记住"贴棋盘框"的紧凑裁剪：后续帧也用它识别——
-                        # 装饰物不进输入（"多出一个炮/相"的误检来源之一），
-                        # 识别更快；窗口移动/换模式时由校验失败自动回退
                         tight = _tight_crop_box(br.board_box, img_bgr.shape)
                         if tight is not None:
                             _crop_cache.update(shape=img_bgr.shape[:2],
                                                box=tight)
                         return _from_yolo(br, dets, skin_classes=len(templates or {}))
-                    # 某些皮肤下整窗识别会把装饰边框算进棋盘（框过高、
-                    # 底线错位、将帅丢失）——按棋子位置把窗口裁剪到棋盘
-                    # 区域后重识别一次（实测同皮肤裁剪后识别完全正确）
-                    cropped = _retry_cropped(img_bgr, dets, det, templates)
-                    if cropped is not None:
-                        return cropped
                     return _from_yolo(br, dets, skin_classes=len(templates or {}))
                 # 棋子太少：可能是模型不认识该皮肤，继续尝试几何方案
                 geo = _recognize_geometric(img_bgr)
@@ -209,25 +219,6 @@ def _tight_crop_box(board_box, shape, margin_cells: float = 0.5):
     if x2 - x1 < 50 or y2 - y1 < 50:
         return None
     return (x1, y1, x2, y2)
-
-
-def _retry_cropped(img_bgr: np.ndarray, dets: List[Detection], det,
-                   templates) -> Optional[RecognizeResult]:
-    """裁剪到棋盘区域后重新识别；成功则记住裁剪框供后续帧复用。
-
-    这是"整窗识别把皮肤边框算进棋盘"的修复路径：裁剪后的输入去掉了
-    窗口 UI 与边框干扰，同皮肤下模型识别正常（用户实测 + 实机复现）。
-    首次用"棋子范围+1.5 格"的宽松裁剪（某条边棋子漏检时也能框住棋盘），
-    成功后记住"贴棋盘框+半格"的紧凑裁剪供后续帧使用（更干净）。
-    """
-    cbox = _crop_box_from_dets(dets, img_bgr.shape)
-    if cbox is None:
-        return None
-    res = _recognize_cropped_image(img_bgr, cbox, det, templates)
-    if res is not None:
-        tight = _tight_crop_box(res.board_box, img_bgr.shape) or cbox
-        _crop_cache.update(shape=img_bgr.shape[:2], box=tight)
-    return res
 
 
 def _recognize_cropped_image(img_bgr: np.ndarray, cbox, det,

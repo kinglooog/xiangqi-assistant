@@ -440,3 +440,55 @@ def test_crop_result_touching_edge_rejected(monkeypatch):
         assert P._crop_cache["box"] is None, "不可信的裁剪不得进缓存"
     finally:
         P._crop_cache.update(shape=None, box=None)
+
+
+def test_always_recognizes_on_crop(monkeypatch):
+    """统一"先裁剪再识别"：即使整窗结果可信，也优先返回裁剪图结果。"""
+    import numpy as np
+    import recognition.pipeline as P
+    from core.board import Board
+    from recognition.yolo import Detection
+    from recognition.yolo_board import BoardResult
+
+    full = np.full((900, 600, 3), 40, np.uint8)
+    calls = {"full": 0, "crop": 0}
+
+    class _Det:
+        def detect(self, img):
+            if img.shape[:2] == full.shape[:2]:
+                calls["full"] += 1
+            else:
+                calls["crop"] += 1
+            return [Detection("r_che", 0.9, (10, 10, 40, 40)),
+                    Detection("b_che", 0.9, (50, 10, 80, 40)),
+                    Detection("r_ma", 0.9, (10, 50, 40, 80)),
+                    Detection("b_ma", 0.9, (50, 50, 80, 80))]
+
+    marker = [row[:] for row in Board().grid]
+    marker[9][0] = None                     # 裁剪结果与整窗结果故意不同
+
+    def _fake_from_dets(dets, img=None, skin_templates=None):
+        if img is not None and img.shape[:2] == full.shape[:2]:
+            return BoardResult(grid=[row[:] for row in Board().grid],
+                               red_at_top=False,
+                               board_box=(20.0, 20.0, 500.0, 560.0),
+                               n_pieces=32, n_ambiguous=0, low_conf=[],
+                               corrections=[], n_corrected=0)
+        return BoardResult(grid=[row[:] for row in marker], red_at_top=False,
+                           board_box=(20.0, 20.0, 260.0, 290.0),
+                           n_pieces=31, n_ambiguous=0, low_conf=[],
+                           corrections=[], n_corrected=0)
+
+    monkeypatch.setattr(P, "get_detector", lambda mp=None: _Det())
+    monkeypatch.setattr(P, "get_skin_templates", lambda p=None: None)
+    monkeypatch.setattr(P, "board_from_detections", _fake_from_dets)
+    P._crop_cache.update(shape=None, box=None)
+    try:
+        res = P.recognize_screenshot(full)
+        assert calls["full"] == 1 and calls["crop"] == 1
+        assert "裁剪" in (res.warning or ""), "应走裁剪路径"
+        assert res.n_pieces == 31, "应采用裁剪图上识别出的结果"
+        assert res.grid[9][0] is None
+        assert P._crop_cache["box"] is not None, "应记住紧凑裁剪框"
+    finally:
+        P._crop_cache.update(shape=None, box=None)
